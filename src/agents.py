@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 
 from .contracts import (CaseHeader, DeliveryScope, Handoff, OrderSellerScope,
-                        PaymentScope, VerificationScope)
+                        PaymentScope)
 from .openrouter import OpenRouterClient
 from .prompt_registry import get_agent_system_prompt
 
@@ -43,7 +43,7 @@ class ModelBackedAgent:
 class OrderSellerAgent(ModelBackedAgent):
     name = "order_seller_agent"
 
-    def run(self, ctx: OrderSellerScope) -> Handoff:
+    def run(self, ctx: OrderSellerScope, task: str = "Analyze order and seller evidence") -> Handoff:
         carrier_at = timestamp(ctx.delivered_carrier_date)
         late_sellers = sorted({i.seller_id for i in ctx.items
                                if carrier_at and carrier_at > timestamp(i.shipping_limit_date)})
@@ -60,13 +60,14 @@ class OrderSellerAgent(ModelBackedAgent):
             + [f'item:{ctx.header.order_id}:{i.order_item_id}' for i in ctx.items][:5]
             + [f"seller:{s}" for s in late_sellers][:3]
         )
-        return Handoff(self.name, ctx.header.case_id, facts, evidence, self.consult(facts))
+        return Handoff(self.name, ctx.header.case_id, facts, evidence,
+                       self.consult({"assigned_task": task, "facts": facts}))
 
 
 class PaymentAgent(ModelBackedAgent):
     name = "payment_agent"
 
-    def run(self, ctx: PaymentScope) -> Handoff:
+    def run(self, ctx: PaymentScope, task: str = "Reconcile payment evidence") -> Handoff:
         total = sum((Decimal(p.payment_value) for p in ctx.payments), Decimal("0"))
         expected = Decimal(ctx.expected_order_total_brl)
         facts = {
@@ -75,13 +76,14 @@ class PaymentAgent(ModelBackedAgent):
             "payment_ids": [f'{ctx.header.order_id}:{p.payment_sequential}' for p in ctx.payments][:5],
         }
         evidence = [f'payment:{ctx.header.order_id}:{p.payment_sequential}' for p in ctx.payments][:5]
-        return Handoff(self.name, ctx.header.case_id, facts, evidence, self.consult(facts))
+        return Handoff(self.name, ctx.header.case_id, facts, evidence,
+                       self.consult({"assigned_task": task, "facts": facts}))
 
 
 class DeliveryAgent(ModelBackedAgent):
     name = "delivery_agent"
 
-    def run(self, ctx: DeliveryScope) -> Handoff:
+    def run(self, ctx: DeliveryScope, task: str = "Analyze delivery timing evidence") -> Handoff:
         delivered = timestamp(ctx.delivered_customer_date)
         estimated = timestamp(ctx.estimated_delivery_date)
         facts = {
@@ -89,13 +91,15 @@ class DeliveryAgent(ModelBackedAgent):
             "estimated_at": ctx.estimated_delivery_date,
             "delivered_late": bool(delivered and estimated and delivered > estimated),
         }
-        return Handoff(self.name, ctx.header.case_id, facts, [f"order:{ctx.header.order_id}"], self.consult(facts))
+        return Handoff(self.name, ctx.header.case_id, facts, [f"order:{ctx.header.order_id}"],
+                       self.consult({"assigned_task": task, "facts": facts}))
 
 
 class PolicyAgent(ModelBackedAgent):
     name = "policy_agent"
 
-    def run(self, ctx: CaseHeader, facts: dict) -> Handoff:
+    def run(self, ctx: CaseHeader, facts: dict,
+            task: str = "Apply EC_POLICY_V1 to collected facts") -> Handoff:
         if ctx.policy_version != "EC_POLICY_V1":
             raise ValueError(f"Unsupported policy: {ctx.policy_version}")
         status, paid = facts["order_status"], facts["payment_total_brl"] > 0
@@ -119,48 +123,45 @@ class PolicyAgent(ModelBackedAgent):
             "primary_issue": issue, "cause_code": cause, "responsible_parties": parties,
             "recommended_refund_brl": money(Decimal(str(refund))), "action": action,
         }
-        review_payload = {"specialist_facts": facts, "proposed_decision": decision_facts}
+        review_payload = {"assigned_task": task, "specialist_facts": facts,
+                          "proposed_decision": decision_facts}
         return Handoff(self.name, ctx.case_id, decision_facts, [f"policy:{cause}"], self.consult(review_payload))
 
 
 class CoordinatorAgent(ModelBackedAgent):
     name = "coordinator_agent"
 
-    DELEGATES = {"order_seller_agent", "payment_agent", "delivery_agent"}
+    DELEGATES = {"order_seller_agent", "payment_agent", "delivery_agent", "policy_agent"}
 
-    def plan(self, ctx: CaseHeader) -> dict:
-        """Ask the coordinator once for a sequential specialist execution plan."""
-        plan = self.consult({
+    def plan(self, ctx: CaseHeader, state: dict) -> dict:
+        """Choose one next delegation or finalize based on collected evidence."""
+        decision = self.consult({
             "case": {"case_id": ctx.case_id, "order_id": ctx.order_id,
-                     "policy_version": ctx.policy_version, "order_status": ctx.order_status},
-            "available_specialists": sorted(self.DELEGATES),
+                     "policy_version": ctx.policy_version, "order_status": ctx.order_status,
+                     "customer_language": ctx.customer_language,
+                     "customer_message": ctx.customer_message},
+            "state": state,
         })
-        if plan is None:
+        if decision is None:
             raise RuntimeError("Coordinator planning requires an enabled OpenRouter client")
-        if plan.get("openrouter_error"):
-            agents = ["order_seller_agent", "payment_agent"]
+        if decision.get("openrouter_error"):
+            completed = set(state["completed_agents"])
+            fallback_order = ["order_seller_agent", "payment_agent"]
             if ctx.order_status not in {"canceled", "unavailable"}:
-                agents.append("delivery_agent")
-            return {
-                "agents": agents,
-                "reason": "OpenRouter plan unavailable; used safe status-based fallback",
-                "model_error": plan["openrouter_error"],
-            }
-        agents = plan.get("agents")
-        if not isinstance(agents, list) or not agents:
-            raise ValueError("Coordinator plan must contain a non-empty 'agents' list")
-        if len(agents) != len(set(agents)):
-            raise ValueError("Coordinator plan contains duplicate agents")
-        unknown = set(agents) - self.DELEGATES
-        if unknown:
-            raise ValueError(f"Coordinator plan contains unknown agents: {sorted(unknown)}")
-        required = {"order_seller_agent", "payment_agent"}
-        if ctx.order_status not in {"canceled", "unavailable"}:
-            required.add("delivery_agent")
-        missing = required - set(agents)
-        if missing:
-            raise ValueError(f"Coordinator plan misses required agents: {sorted(missing)}")
-        return plan
+                fallback_order.append("delivery_agent")
+            fallback_order.append("policy_agent")
+            target = next((name for name in fallback_order if name not in completed), None)
+            if target:
+                return {"action": "delegate", "target_agent": target,
+                        "task": "Collect required evidence", "model_error": decision["openrouter_error"]}
+            return {"action": "finalize", "reason": "Safe fallback has sufficient evidence",
+                    "model_error": decision["openrouter_error"]}
+        action = decision.get("action")
+        if action not in {"delegate", "finalize"}:
+            raise ValueError(f"Coordinator returned invalid action: {action!r}")
+        if action == "delegate" and decision.get("target_agent") not in self.DELEGATES:
+            raise ValueError(f"Coordinator returned invalid target: {decision.get('target_agent')!r}")
+        return decision
 
     def build_result(self, ctx: CaseHeader, handoffs: list[Handoff]) -> dict:
         facts = {k: v for handoff in handoffs for k, v in handoff.facts.items()}
@@ -183,18 +184,3 @@ class CoordinatorAgent(ModelBackedAgent):
             "resolution_actions": [facts["action"]],
         }
         return result
-
-
-class VerifierAgent(ModelBackedAgent):
-    name = "verifier_agent"
-    ISSUES = {"canceled_order_paid", "unavailable_order_paid", "late_delivery_seller",
-              "late_delivery_logistics", "valid_split_payment", "unsupported_late_claim"}
-
-    def run(self, ctx: VerificationScope, result: dict) -> None:
-        self.last_model_analysis = self.consult({"case_id": ctx.header.case_id, "draft": result})
-        assert result["case_id"] == ctx.header.case_id
-        assert result["assessment"]["primary_issue"] in self.ISSUES
-        assert 0 <= result["assessment"]["confidence"] <= 1
-        assert len(result["evidence_ids"]) <= 10
-        assert all(v >= 0 for k, v in result["financial_resolution"].items() if k.endswith("_brl"))
-        assert set(result["evidence_ids"]) <= ctx.valid_evidence_ids

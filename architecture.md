@@ -1,81 +1,70 @@
-# Kiến trúc đơn luồng Multi-Agent giải quyết khiếu nại Olist
+# Kiến trúc Adaptive Single-Thread Multi-Agent
 
-## Nguyên tắc
+## Luồng chính
 
-Mỗi case chạy trên một luồng tuần tự. Tại một thời điểm chỉ có Coordinator hoặc đúng một sub-agent hoạt động. Không dùng fan-out song song và không chia sẻ toàn bộ context cho sub-agent.
+Mỗi case chạy tuần tự. Coordinator là agent duy nhất quyết định routing và kiểm tra mức độ đầy đủ của kết quả.
 
 ```mermaid
 flowchart TD
-    I[Case JSON] --> S[OlistStore tạo scoped views]
-    S --> C[Coordinator tạo một sequential plan]
-    C --> A1[Sub-agent 1]
-    A1 -->|handoff| A2[Sub-agent 2 nếu cần]
-    A2 -->|handoff| A3[Sub-agent 3 nếu cần]
-    A3 --> P[Policy Agent]
-    P --> V[Build result + Verifier]
-    V -->|pass| F[Output JSON]
-    C -. command .-> T[trace.jsonl]
-    A -. handoff .-> T
-    P -. decision .-> T
-    V -. result .-> T
+    I[Customer request + CaseHeader] --> C[Coordinator]
+    C -->|identify domain + assign task| A[One selected sub-agent]
+    A -->|facts + evidence + analysis| C
+    C -->|insufficient evidence / wrong route| B[Another relevant sub-agent]
+    B -->|new handoff| C
+    C -->|enough domain evidence| P[Policy Agent]
+    P -->|decision handoff| C
+    C -->|review complete| G[Deterministic schema/evidence guard]
+    G --> O[Output JSON]
 ```
 
-“Đơn luồng” ở đây nghĩa là execution tuần tự, không có nghĩa chỉ có một agent. Coordinator chỉ được gọi một lần để trả danh sách agent theo thứ tự. Executor sau đó chạy mỗi agent đúng một lần; không quay lại hỏi Coordinator sau từng handoff.
+Coordinator được gọi lại sau mỗi handoff, nhưng tại một thời điểm chỉ một sub-agent chạy. Không fan-out song song và không bắt buộc gọi agent không liên quan. Vòng routing có giới hạn 8 turn và chỉ cho phép đúng 1 corrective re-route. Lỗi route lần hai hoặc hết 8 turn sẽ kích hoạt deterministic fallback để hoàn thành case, không dừng toàn bộ lượt chạy.
 
-## Quyền đọc dữ liệu bằng scoped view
+## Nhiệm vụ Coordinator
 
-`OlistStore` là thành phần duy nhất giữ raw CSV index. Khi đọc một case, store tạo `CaseScopes`; container này chỉ thuộc về executor và không bao giờ được truyền nguyên khối cho sub-agent.
+- Đọc customer request, order status và state hiện tại.
+- Xác định domain còn thiếu bằng chứng.
+- Giao một task cụ thể cho đúng sub-agent.
+- Đọc handoff và quyết định route tiếp, gọi Policy, hoặc finalize.
+- Phát hiện route sai, agent thiếu evidence hoặc Policy được gọi quá sớm.
+- Kiểm tra tính đầy đủ trước khi tạo output.
 
-| Agent | Object thực sự nhận | Có thể đọc | Không có quyền/không có thuộc tính |
-|---|---|---|---|
-| Coordinator | `CaseHeader` + handoff state | case ID, order ID, policy version, facts đã bàn giao | Raw order/items/payments |
-| Order & Seller | `OrderSellerScope` | status, carrier handoff, item, seller, shipping limit, price/freight | Payment rows, customer delivery estimate |
-| Payment | `PaymentScope` | payment sequence/value và aggregate expected order total | Raw item/seller rows, delivery timestamps |
-| Delivery | `DeliveryScope` | actual và estimated delivery timestamps | Payments, item prices, sellers |
-| Policy | `CaseHeader` + specialist facts | Facts đã qua handoff và policy version | Raw CSV rows |
-| Verifier | `VerificationScope` + output candidate | Tập evidence ID hợp lệ và case header | Raw business rows |
+Catalog đầy đủ về nhiệm vụ, quyền dữ liệu và thời điểm gọi từng sub-agent nằm trực tiếp trong `src/prompts/coordinator.md`.
 
-Các contract nằm trong `src/contracts.py`. Phép chiếu raw CSV thành scope nằm trong `src/data_store.py`. `_scope_for()` trong `src/orchestrator.py` là capability router: target agent nào chỉ nhận scope của agent đó.
+## Sub-agent
 
-Ví dụ Payment Agent nhận:
+| Agent | Nhiệm vụ | Scoped data |
+|---|---|---|
+| Order & Seller | Status, item/seller, shipping limit, item/freight totals | `OrderSellerScope` |
+| Payment | Payment total, split payment, reconciliation | `PaymentScope` |
+| Delivery | Actual delivery so với estimate | `DeliveryScope` |
+| Policy | Áp dụng priority EC_POLICY_V1 trên facts đã thu thập | `CaseHeader` + handoffs |
 
-```text
-PaymentScope
-├── header
-├── payments(payment_sequential, payment_value)
-└── expected_order_total_brl
-```
+Không còn `VerifierAgent`. Việc kiểm tra cuối nằm trong `src/validation.py`; đây là hard gate Python, không có soul/model/prompt và không phát sinh API call.
 
-Nó không thể truy cập `seller_id`, `shipping_limit_date` hoặc delivery timestamps vì các field này không tồn tại trong object được truyền vào. Đây là giới hạn ở data contract, không chỉ là lời nhắc trong prompt.
+## Data access thực tế
 
-## Luồng một case
+`OlistStore` giữ raw CSV và tạo `CaseScopes`. Executor chỉ truyền projection tương ứng:
 
-1. Main nạp `.env`, kiểm tra model/prompt registry và xóa trace cũ.
-2. Store đọc `claimed_order_id`, truy xuất raw rows rồi tạo các scoped view bất biến.
-3. Coordinator LLM nhìn `CaseHeader` và trả một sequential plan duy nhất.
-4. Executor chạy lần lượt các agent trong plan, mỗi agent nhận đúng scoped view của mình.
-5. Mỗi sub-agent tạo handoff và executor ghi trace.
-6. Policy áp dụng `EC_POLICY_V1`; code dựng result; Verifier kiểm tra evidence/schema/tiền.
-7. Result hợp lệ được ghi vào `output/`.
+- Coordinator nhận `CaseHeader`, customer request và handoffs; không nhận raw CSV rows.
+- Order/Seller không có payment hoặc customer-delivery fields.
+- Payment chỉ có payment rows và expected-total aggregate; không có seller/items raw.
+- Delivery chỉ có hai delivery timestamps.
+- Policy chỉ có facts do các agent khác bàn giao.
 
-Chế độ `--offline` vẫn tuần tự nhưng dùng thứ tự cố định để test. Chế độ `--require-openrouter` dùng Coordinator LLM quyết định từng bước.
+Các dataclass là frozen và nằm trong `src/contracts.py`. Capability routing nằm tại `_scope_for()` trong `src/orchestrator.py`.
 
-## Cấu hình agent
+## Trace
 
-- Model: `AGENT_MODEL_CONFIG` trong `src/config.py`.
-- Soul và prompt file: `AGENT_PROMPT_CONFIG` trong `src/config.py`.
-- System prompts: `src/prompts/*.md`.
-- Prompt composition: `src/prompt_registry.py`.
-- OpenRouter adapter: `src/openrouter.py`.
+Các event quan trọng:
 
-Chạy một case qua OpenRouter:
+- `route_decision`: Coordinator chọn agent hoặc finalize.
+- `route_rejected`: route/response không hợp lệ.
+- `handoff`: sub-agent trả facts và evidence.
+- `result_rejected`: output chưa đủ hoặc không qua hard gate.
+- `result_checked`: output cuối hợp lệ.
+
+Chạy một case trước:
 
 ```bash
 python -m src.main --require-openrouter --case EC_001
-```
-
-Chạy kiểm thử không gọi API:
-
-```bash
-python -m src.main --offline
 ```

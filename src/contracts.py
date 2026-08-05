@@ -11,6 +11,8 @@ class CaseHeader:
     order_id: str
     policy_version: str
     order_status: str
+    customer_language: str
+    customer_message: str
 
 
 @dataclass(frozen=True)

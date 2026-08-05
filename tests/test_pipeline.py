@@ -30,7 +30,7 @@ class PipelineTest(unittest.TestCase):
 
     def test_every_agent_model_respects_parameter_limit(self):
         expected = {"coordinator_agent", "order_seller_agent", "payment_agent",
-                    "delivery_agent", "policy_agent", "verifier_agent"}
+                    "delivery_agent", "policy_agent"}
         self.assertEqual(expected, set(AGENT_MODEL_CONFIG))
         for agent_id in expected:
             self.assertLessEqual(get_agent_model_config(agent_id)["parameter_size_billion"], 10)
@@ -52,7 +52,13 @@ class PipelineTest(unittest.TestCase):
             def complete_json(self, agent_id, system, payload):
                 self.calls.append(agent_id)
                 if agent_id == "coordinator_agent":
-                    return {"agents": ["order_seller_agent", "payment_agent", "delivery_agent"]}
+                    completed = set(payload["state"]["completed_agents"])
+                    for target in ["order_seller_agent", "payment_agent", "delivery_agent",
+                                   "policy_agent"]:
+                        if target not in completed:
+                            return {"action": "delegate", "target_agent": target,
+                                    "task": "collect evidence"}
+                    return {"action": "finalize", "reason": "evidence complete"}
                 return {"mock_review": True}
 
         client = FakeClient()
@@ -98,6 +104,25 @@ class PipelineTest(unittest.TestCase):
         self.assertFalse(hasattr(scopes.delivery, "payments"))
         self.assertFalse(hasattr(scopes.delivery, "items"))
         self.assertFalse(hasattr(scopes.header, "order"))
+
+    def test_second_route_error_activates_fallback_instead_of_failing(self):
+        class BadRouter:
+            enabled = True
+
+            def complete_json(self, agent_id, system, payload):
+                if agent_id == "coordinator_agent":
+                    return {"action": "delegate", "target_agent": "policy_agent",
+                            "task": "apply too early"}
+                return {"review": "ok"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            trace_path = Path(directory) / "trace.jsonl"
+            runner = DisputeOrchestrator(
+                self.store, trace_path, BadRouter()
+            )
+            result = runner.run_case(INPUT_DIR / "EC_001.json")
+            self.assertEqual("EC_001", result["case_id"])
+            self.assertIn('"event": "fallback_activated"', trace_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -42,7 +42,9 @@ class OlistStore:
         item_rows = self.items.get(order_id, [])
         payment_rows = self.payments.get(order_id, [])
         header = CaseHeader(
-            case["case_id"], order_id, case["policy_version"], order["order_status"]
+            case["case_id"], order_id, case["policy_version"], order["order_status"],
+            case["customer_request"].get("language", "unknown"),
+            case["customer_request"].get("message", ""),
         )
         items = tuple(OrderItemView(
             row["order_item_id"], row["seller_id"], row["shipping_limit_date"],

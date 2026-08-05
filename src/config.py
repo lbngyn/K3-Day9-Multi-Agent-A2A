@@ -49,13 +49,6 @@ AGENT_MODEL_CONFIG = MappingProxyType({
         "max_tokens": 500,
         "reasoning_enabled": False,
     },
-    "verifier_agent": {
-        "model": "meta-llama/llama-3.1-8b-instruct",
-        "parameter_size_billion": 8.0,
-        "temperature": 0.0,
-        "max_tokens": 350,
-        "reasoning_enabled": False,
-    },
 })
 
 # Persona/prompt mapping is independent from model mapping, so either can be
@@ -66,7 +59,6 @@ AGENT_PROMPT_CONFIG = MappingProxyType({
     "payment_agent": {"soul": "Exact payment reconciliation accountant", "system_prompt_file": "payment.md"},
     "delivery_agent": {"soul": "Timestamp-focused delivery investigator", "system_prompt_file": "delivery.md"},
     "policy_agent": {"soul": "Conservative EC_POLICY_V1 adjudicator", "system_prompt_file": "policy.md"},
-    "verifier_agent": {"soul": "Adversarial evidence and schema auditor", "system_prompt_file": "verifier.md"},
 })
 
 
