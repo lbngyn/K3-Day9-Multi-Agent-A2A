@@ -52,18 +52,7 @@ class PipelineTest(unittest.TestCase):
             def complete_json(self, agent_id, system, payload):
                 self.calls.append(agent_id)
                 if agent_id == "coordinator_agent":
-                    state = payload["state"]
-                    completed = set(state["completed_specialists"])
-                    for target in ["order_seller_agent", "payment_agent", "delivery_agent"]:
-                        if target not in completed:
-                            return {"action": "delegate", "target_agent": target, "task": "analyze"}
-                    if not state["policy_completed"]:
-                        return {"action": "apply_policy"}
-                    if not state["draft_built"]:
-                        return {"action": "build_draft"}
-                    if not state["verification_passed"]:
-                        return {"action": "verify"}
-                    return {"action": "finalize"}
+                    return {"agents": ["order_seller_agent", "payment_agent", "delivery_agent"]}
                 return {"mock_review": True}
 
         client = FakeClient()
@@ -90,6 +79,25 @@ class PipelineTest(unittest.TestCase):
         }}]}
         with self.assertRaisesRegex(ValueError, "finish_reason='length'"):
             OpenRouterClient._extract_json(result, "coordinator_agent")
+
+    def test_openrouter_can_recover_json_from_reasoning_field(self):
+        result = {"choices": [{"finish_reason": "length", "message": {
+            "content": None,
+            "reasoning": 'Short analysis. Final: {"agents":["payment_agent"]}',
+        }}]}
+        self.assertEqual(
+            {"agents": ["payment_agent"]},
+            OpenRouterClient._extract_json(result, "coordinator_agent"),
+        )
+
+    def test_specialists_receive_scoped_data_not_full_case(self):
+        scopes = self.store.context(INPUT_DIR / "EC_001.json")
+        self.assertFalse(hasattr(scopes.order_seller, "payments"))
+        self.assertFalse(hasattr(scopes.payment, "items"))
+        self.assertFalse(hasattr(scopes.payment, "order_status"))
+        self.assertFalse(hasattr(scopes.delivery, "payments"))
+        self.assertFalse(hasattr(scopes.delivery, "items"))
+        self.assertFalse(hasattr(scopes.header, "order"))
 
 
 if __name__ == "__main__":

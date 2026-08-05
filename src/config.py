@@ -18,37 +18,43 @@ AGENT_MODEL_CONFIG = MappingProxyType({
         "model": "qwen/qwen3.5-9b",
         "parameter_size_billion": 9.0,
         "temperature": 0.0,
-        "max_tokens": 500,
+        "max_tokens": 1200,
+        "reasoning_enabled": False,
     },
     "order_seller_agent": {
         "model": "meta-llama/llama-3.1-8b-instruct",
         "parameter_size_billion": 8.0,
         "temperature": 0.0,
         "max_tokens": 350,
+        "reasoning_enabled": False,
     },
     "payment_agent": {
         "model": "meta-llama/llama-3.1-8b-instruct",
         "parameter_size_billion": 8.0,
         "temperature": 0.0,
         "max_tokens": 350,
+        "reasoning_enabled": False,
     },
     "delivery_agent": {
         "model": "meta-llama/llama-3.1-8b-instruct",
         "parameter_size_billion": 8.0,
         "temperature": 0.0,
         "max_tokens": 350,
+        "reasoning_enabled": False,
     },
     "policy_agent": {
         "model": "meta-llama/llama-3.1-8b-instruct",
         "parameter_size_billion": 8.0,
         "temperature": 0.0,
         "max_tokens": 500,
+        "reasoning_enabled": False,
     },
     "verifier_agent": {
         "model": "meta-llama/llama-3.1-8b-instruct",
         "parameter_size_billion": 8.0,
         "temperature": 0.0,
         "max_tokens": 350,
+        "reasoning_enabled": False,
     },
 })
 
@@ -84,6 +90,7 @@ def agent_models_metadata() -> dict[str, dict[str, Any]]:
             "parameter_size_billion": config["parameter_size_billion"],
             "temperature": config["temperature"],
             "max_tokens": config["max_tokens"],
+            "reasoning_enabled": config["reasoning_enabled"],
         }
         for agent_id, config in AGENT_MODEL_CONFIG.items()
     }

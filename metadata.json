@@ -5,37 +5,43 @@
       "model": "qwen/qwen3.5-9b",
       "parameter_size_billion": 9.0,
       "temperature": 0.0,
-      "max_tokens": 500
+      "max_tokens": 1200,
+      "reasoning_enabled": false
     },
     "order_seller_agent": {
       "model": "meta-llama/llama-3.1-8b-instruct",
       "parameter_size_billion": 8.0,
       "temperature": 0.0,
-      "max_tokens": 350
+      "max_tokens": 350,
+      "reasoning_enabled": false
     },
     "payment_agent": {
       "model": "meta-llama/llama-3.1-8b-instruct",
       "parameter_size_billion": 8.0,
       "temperature": 0.0,
-      "max_tokens": 350
+      "max_tokens": 350,
+      "reasoning_enabled": false
     },
     "delivery_agent": {
       "model": "meta-llama/llama-3.1-8b-instruct",
       "parameter_size_billion": 8.0,
       "temperature": 0.0,
-      "max_tokens": 350
+      "max_tokens": 350,
+      "reasoning_enabled": false
     },
     "policy_agent": {
       "model": "meta-llama/llama-3.1-8b-instruct",
       "parameter_size_billion": 8.0,
       "temperature": 0.0,
-      "max_tokens": 500
+      "max_tokens": 500,
+      "reasoning_enabled": false
     },
     "verifier_agent": {
       "model": "meta-llama/llama-3.1-8b-instruct",
       "parameter_size_billion": 8.0,
       "temperature": 0.0,
-      "max_tokens": 350
+      "max_tokens": 350,
+      "reasoning_enabled": false
     }
   },
   "agent_prompts": {
@@ -64,9 +70,9 @@
       "system_prompt_file": "verifier.md"
     }
   },
-  "openrouter_inference_enabled": false,
+  "openrouter_inference_enabled": true,
   "framework": "custom typed multi-agent orchestration (Python stdlib)",
   "runtime": "Python 3.13.9",
   "cases_processed": 50,
-  "generated_at": "2026-08-05T03:29:38.252268+00:00"
+  "generated_at": "2026-08-05T04:35:40.964258+00:00"
 }

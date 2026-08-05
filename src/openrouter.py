@@ -26,6 +26,10 @@ class OpenRouterClient:
             "model": agent_config["model"],
             "temperature": agent_config["temperature"],
             "max_tokens": agent_config["max_tokens"],
+            "reasoning": {
+                "enabled": agent_config.get("reasoning_enabled", False),
+                "exclude": True,
+            },
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system},
@@ -35,24 +39,10 @@ class OpenRouterClient:
         result = self._request(request_body)
         try:
             return self._extract_json(result, agent_id)
-        except ValueError as first_error:
-            # Some reasoning models spend the whole budget before producing
-            # message.content. Retry once with hidden/low reasoning and more room.
-            retry_body = dict(request_body)
-            retry_body["max_tokens"] = max(800, agent_config["max_tokens"] * 2)
-            retry_body["reasoning"] = {"effort": "low", "exclude": True}
-            retry_body["messages"] = request_body["messages"] + [{
-                "role": "user",
-                "content": "Return the final JSON object now. No prose or markdown.",
-            }]
-            retry_result = self._request(retry_body)
-            try:
-                return self._extract_json(retry_result, agent_id)
-            except ValueError as retry_error:
-                raise RuntimeError(
-                    f"OpenRouter agent '{agent_id}' returned no parseable JSON after retry. "
-                    f"First response: {first_error}; retry response: {retry_error}"
-                ) from retry_error
+        except ValueError as exc:
+            raise RuntimeError(
+                f"OpenRouter agent '{agent_id}' returned no parseable JSON: {exc}"
+            ) from exc
 
     def _request(self, request_body: dict) -> dict:
         body = json.dumps(request_body).encode()
@@ -62,7 +52,7 @@ class OpenRouterClient:
             "HTTP-Referer": "https://github.com/vinai/K3-Day9-Multi-Agent-A2A",
             "X-Title": "Olist Multi-Agent Dispute Resolution",
         })
-        with urllib.request.urlopen(req, timeout=60) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             return json.load(response)
 
     @staticmethod
@@ -107,6 +97,11 @@ class OpenRouterClient:
                 return cls._parse_json_text(arguments)
         finish = choice.get("finish_reason")
         reasoning = message.get("reasoning") or choice.get("reasoning")
+        if isinstance(reasoning, str) and "{" in reasoning:
+            try:
+                return cls._parse_json_text(reasoning)
+            except ValueError:
+                pass
         detail = "present" if reasoning else "absent"
         raise ValueError(
             f"message.content is empty (finish_reason={finish!r}, reasoning={detail}, agent={agent_id})"

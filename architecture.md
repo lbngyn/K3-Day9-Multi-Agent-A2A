@@ -1,54 +1,81 @@
-# Kiến trúc Multi-Agent giải quyết khiếu nại Olist
+# Kiến trúc đơn luồng Multi-Agent giải quyết khiếu nại Olist
 
-## Mục tiêu thiết kế
+## Nguyên tắc
 
-Hệ thống tách việc truy xuất sự thật, áp dụng policy, tổng hợp và kiểm chứng thành các agent có contract rõ ràng. LLM không được dùng để tính tiền, tạo evidence ID hoặc thay đổi policy. Nhờ vậy kết quả có thể tái lập và không phụ thuộc vào cách model diễn đạt.
+Mỗi case chạy trên một luồng tuần tự. Tại một thời điểm chỉ có Coordinator hoặc đúng một sub-agent hoạt động. Không dùng fan-out song song và không chia sẻ toàn bộ context cho sub-agent.
 
 ```mermaid
-flowchart LR
-    I[Case JSON] --> C[Coordinator]
-    C --> OS[Order & Seller Agent]
-    C --> PA[Payment Agent]
-    C --> DA[Delivery Agent]
-    OS -->|facts + evidence| PO[Policy Agent]
-    PA -->|facts + evidence| PO
-    DA -->|facts + evidence| PO
-    PO -->|decision handoff| C
-    C --> V[Verifier Agent]
-    V -->|valid| O[Output JSON]
-    V -->|invalid| X[Fail closed]
-    OS -.-> T[trace.jsonl]
-    PA -.-> T
-    DA -.-> T
-    PO -.-> T
-    C -.-> T
-    V -.-> T
+flowchart TD
+    I[Case JSON] --> S[OlistStore tạo scoped views]
+    S --> C[Coordinator tạo một sequential plan]
+    C --> A1[Sub-agent 1]
+    A1 -->|handoff| A2[Sub-agent 2 nếu cần]
+    A2 -->|handoff| A3[Sub-agent 3 nếu cần]
+    A3 --> P[Policy Agent]
+    P --> V[Build result + Verifier]
+    V -->|pass| F[Output JSON]
+    C -. command .-> T[trace.jsonl]
+    A -. handoff .-> T
+    P -. decision .-> T
+    V -. result .-> T
 ```
 
-## Vai trò và quyền truy cập
+“Đơn luồng” ở đây nghĩa là execution tuần tự, không có nghĩa chỉ có một agent. Coordinator chỉ được gọi một lần để trả danh sách agent theo thứ tự. Executor sau đó chạy mỗi agent đúng một lần; không quay lại hỏi Coordinator sau từng handoff.
 
-| Agent | Dữ liệu được đọc | Trách nhiệm | Không được phép |
+## Quyền đọc dữ liệu bằng scoped view
+
+`OlistStore` là thành phần duy nhất giữ raw CSV index. Khi đọc một case, store tạo `CaseScopes`; container này chỉ thuộc về executor và không bao giờ được truyền nguyên khối cho sub-agent.
+
+| Agent | Object thực sự nhận | Có thể đọc | Không có quyền/không có thuộc tính |
 |---|---|---|---|
-| Coordinator | Case và handoff | Phân công, ghép output theo schema | Tự tạo facts/evidence |
-| Order & Seller | orders, order_items | Status, item/seller, shipping limit, totals | Quyết định refund |
-| Payment | order_payments và tổng giá trị item được đối soát | Tổng payment, split payment, reconciliation | Suy đoán refund ledger |
-| Delivery | timestamps trong orders | So sánh actual với estimated | Suy đoán tracking checkpoint |
-| Policy | Handoff đã cấu trúc | Áp dụng đúng thứ tự EC_POLICY_V1 | Đọc trực tiếp customer message để “tin claim” |
-| Verifier | Context gốc và output draft | Chặn ID giả, tiền âm, enum/limit sai | Sửa ngầm output |
+| Coordinator | `CaseHeader` + handoff state | case ID, order ID, policy version, facts đã bàn giao | Raw order/items/payments |
+| Order & Seller | `OrderSellerScope` | status, carrier handoff, item, seller, shipping limit, price/freight | Payment rows, customer delivery estimate |
+| Payment | `PaymentScope` | payment sequence/value và aggregate expected order total | Raw item/seller rows, delivery timestamps |
+| Delivery | `DeliveryScope` | actual và estimated delivery timestamps | Payments, item prices, sellers |
+| Policy | `CaseHeader` + specialist facts | Facts đã qua handoff và policy version | Raw CSV rows |
+| Verifier | `VerificationScope` + output candidate | Tập evidence ID hợp lệ và case header | Raw business rows |
 
-## Luồng handoff
+Các contract nằm trong `src/contracts.py`. Phép chiếu raw CSV thành scope nằm trong `src/data_store.py`. `_scope_for()` trong `src/orchestrator.py` là capability router: target agent nào chỉ nhận scope của agent đó.
 
-1. `OlistStore` nạp CSV ở chế độ chỉ đọc và dựng index theo `order_id`.
-2. Khi OpenRouter được bật, Coordinator LLM nhận state và phát đúng một command trong `delegate`, `apply_policy`, `build_draft`, `verify`, `finalize`.
-3. Python executor kiểm tra quyền và prerequisite rồi mới thực thi command. Command sai bị reject, lỗi được đưa lại vào state cho turn kế tiếp; tối đa 15 turn và 3 lỗi plan.
-4. Mỗi specialist trả `Handoff(agent, case_id, facts, evidence_ids, model_analysis)`. Policy chỉ chạy sau khi đủ ba specialist; finalize chỉ hợp lệ sau verifier.
-5. Deterministic guard vẫn tính tiền, áp policy và xác minh evidence nhằm ngăn model bịa dữ liệu. LLM quyết định routing/next step và review domain, không được ghi đè trusted facts.
-6. Chỉ output đã qua verifier mới được ghi. Mọi command, handoff, rejection và kết quả inference được ghi trong `trace.jsonl`.
+Ví dụ Payment Agent nhận:
 
-Chế độ `--offline` là fallback tái lập, dùng thứ tự cố định và không được xem là LLM orchestration run để nộp trace.
+```text
+PaymentScope
+├── header
+├── payments(payment_sequential, payment_value)
+└── expected_order_total_brl
+```
 
-## OpenRouter và độ tin cậy
+Nó không thể truy cập `seller_id`, `shipping_limit_date` hoặc delivery timestamps vì các field này không tồn tại trong object được truyền vào. Đây là giới hạn ở data contract, không chỉ là lời nhắc trong prompt.
 
-Provider là OpenRouter. Model của từng agent được khai báo công khai trong `AGENT_MODEL_CONFIG` tại `src/config.py`; soul và đường dẫn system prompt nằm trong `AGENT_PROMPT_CONFIG`. Nội dung prompt nằm ở `src/prompts/*.md`, được ghép và kiểm tra bởi `src/prompt_registry.py`. `src/openrouter.py` là adapter OpenAI-compatible. Phản hồi model được lưu dưới `model_analysis` để audit và không được ghi đè facts, policy hay financial fields.
+## Luồng một case
 
-Chạy tự động dùng OpenRouter khi có key: `python -m src.main`. Bắt buộc OpenRouter: `python -m src.main --require-openrouter`. Chạy không gọi model: `python -m src.main --offline`. Chạy một case: thêm `--case EC_001`.
+1. Main nạp `.env`, kiểm tra model/prompt registry và xóa trace cũ.
+2. Store đọc `claimed_order_id`, truy xuất raw rows rồi tạo các scoped view bất biến.
+3. Coordinator LLM nhìn `CaseHeader` và trả một sequential plan duy nhất.
+4. Executor chạy lần lượt các agent trong plan, mỗi agent nhận đúng scoped view của mình.
+5. Mỗi sub-agent tạo handoff và executor ghi trace.
+6. Policy áp dụng `EC_POLICY_V1`; code dựng result; Verifier kiểm tra evidence/schema/tiền.
+7. Result hợp lệ được ghi vào `output/`.
+
+Chế độ `--offline` vẫn tuần tự nhưng dùng thứ tự cố định để test. Chế độ `--require-openrouter` dùng Coordinator LLM quyết định từng bước.
+
+## Cấu hình agent
+
+- Model: `AGENT_MODEL_CONFIG` trong `src/config.py`.
+- Soul và prompt file: `AGENT_PROMPT_CONFIG` trong `src/config.py`.
+- System prompts: `src/prompts/*.md`.
+- Prompt composition: `src/prompt_registry.py`.
+- OpenRouter adapter: `src/openrouter.py`.
+
+Chạy một case qua OpenRouter:
+
+```bash
+python -m src.main --require-openrouter --case EC_001
+```
+
+Chạy kiểm thử không gọi API:
+
+```bash
+python -m src.main --offline
+```
