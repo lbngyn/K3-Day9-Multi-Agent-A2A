@@ -1,0 +1,72 @@
+{
+  "provider": "OpenRouter",
+  "agent_models": {
+    "coordinator_agent": {
+      "model": "qwen/qwen3.5-9b",
+      "parameter_size_billion": 9.0,
+      "temperature": 0.0,
+      "max_tokens": 500
+    },
+    "order_seller_agent": {
+      "model": "meta-llama/llama-3.1-8b-instruct",
+      "parameter_size_billion": 8.0,
+      "temperature": 0.0,
+      "max_tokens": 350
+    },
+    "payment_agent": {
+      "model": "meta-llama/llama-3.1-8b-instruct",
+      "parameter_size_billion": 8.0,
+      "temperature": 0.0,
+      "max_tokens": 350
+    },
+    "delivery_agent": {
+      "model": "meta-llama/llama-3.1-8b-instruct",
+      "parameter_size_billion": 8.0,
+      "temperature": 0.0,
+      "max_tokens": 350
+    },
+    "policy_agent": {
+      "model": "meta-llama/llama-3.1-8b-instruct",
+      "parameter_size_billion": 8.0,
+      "temperature": 0.0,
+      "max_tokens": 500
+    },
+    "verifier_agent": {
+      "model": "meta-llama/llama-3.1-8b-instruct",
+      "parameter_size_billion": 8.0,
+      "temperature": 0.0,
+      "max_tokens": 350
+    }
+  },
+  "agent_prompts": {
+    "coordinator_agent": {
+      "soul": "Evidence-first case lead",
+      "system_prompt_file": "coordinator.md"
+    },
+    "order_seller_agent": {
+      "soul": "Skeptical order and seller investigator",
+      "system_prompt_file": "order_seller.md"
+    },
+    "payment_agent": {
+      "soul": "Exact payment reconciliation accountant",
+      "system_prompt_file": "payment.md"
+    },
+    "delivery_agent": {
+      "soul": "Timestamp-focused delivery investigator",
+      "system_prompt_file": "delivery.md"
+    },
+    "policy_agent": {
+      "soul": "Conservative EC_POLICY_V1 adjudicator",
+      "system_prompt_file": "policy.md"
+    },
+    "verifier_agent": {
+      "soul": "Adversarial evidence and schema auditor",
+      "system_prompt_file": "verifier.md"
+    }
+  },
+  "openrouter_inference_enabled": false,
+  "framework": "custom typed multi-agent orchestration (Python stdlib)",
+  "runtime": "Python 3.13.9",
+  "cases_processed": 50,
+  "generated_at": "2026-08-05T03:29:38.252268+00:00"
+}
